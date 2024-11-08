@@ -38,8 +38,6 @@ class SocketListener extends Command
     public function __construct(SocketService $socketService)
     {
         parent::__construct();
-
-        // Injetamos o serviço de socket via singleton
         $this->socketService = $socketService;
     }
 
@@ -52,7 +50,6 @@ class SocketListener extends Command
         $ip = config('app.udp_host');
         $port = config('app.udp_port');
 
-        // Fazer o bind do socket ao endereço e porta configurados
         if (! socket_bind($socket, $ip, $port)) {
             $this->error('Não foi possível fazer o bind ao socket');
             $this->socketService->closeSocket();
@@ -67,7 +64,6 @@ class SocketListener extends Command
             $from = '';
             $portFrom = 0;
 
-            // Receber dados do socket
             socket_recvfrom($socket, $buffer, 512, 0, $from, $portFrom);
 
             $this->info("Received packet from $from:$portFrom: $buffer");
@@ -78,17 +74,14 @@ class SocketListener extends Command
                 'buffer' => $buffer,
             ];
 
-            // Monta e envia a mensagem de ACK
             $message = $this->mountAckMessage($buffer);
             socket_sendto($socket, $message, strlen($message), 0, $from, $portFrom);
 
             $this->info("Sent packet to $from:$portFrom: $message");
 
-            // Manipula os dados do dispositivo
             $this->handleDevices($receivedData);
         }
 
-        // Fechar o socket ao encerrar o loop
         $this->socketService->closeSocket();
     }
 
