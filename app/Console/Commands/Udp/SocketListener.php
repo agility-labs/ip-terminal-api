@@ -3,6 +3,7 @@
 namespace App\Console\Commands\Udp;
 
 use App\Models\Device;
+use App\Services\Socket\SocketService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 
@@ -23,24 +24,38 @@ class SocketListener extends Command
     protected $description = 'Comando para ativar socket';
 
     /**
+     * The SocketService instance.
+     *
+     * @var SocketService
+     */
+    protected $socketService;
+
+    /**
+     * Create a new command instance.
+     *
+     * @param SocketService $socketService
+     */
+    public function __construct(SocketService $socketService)
+    {
+        parent::__construct();
+
+        // Injetamos o serviço de socket via singleton
+        $this->socketService = $socketService;
+    }
+
+    /**
      * Execute the console command.
      */
     public function handle(): void
     {
+        $socket = $this->socketService->getSocket();
         $ip = config('app.udp_host');
         $port = config('app.udp_port');
 
-        $socket = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
-
-        if (! $socket) {
-            $this->error('Não foi possível criar o socket UDP');
-
-            return;
-        }
-
+        // Fazer o bind do socket ao endereço e porta configurados
         if (! socket_bind($socket, $ip, $port)) {
             $this->error('Não foi possível fazer o bind ao socket');
-            socket_close($socket);
+            $this->socketService->closeSocket();
 
             return;
         }
@@ -52,6 +67,7 @@ class SocketListener extends Command
             $from = '';
             $portFrom = 0;
 
+            // Receber dados do socket
             socket_recvfrom($socket, $buffer, 512, 0, $from, $portFrom);
 
             $this->info("Received packet from $from:$portFrom: $buffer");
@@ -62,16 +78,18 @@ class SocketListener extends Command
                 'buffer' => $buffer,
             ];
 
+            // Monta e envia a mensagem de ACK
             $message = $this->mountAckMessage($buffer);
-
             socket_sendto($socket, $message, strlen($message), 0, $from, $portFrom);
 
-            $this->info("Send packet for $from:$portFrom: $message");
+            $this->info("Sent packet to $from:$portFrom: $message");
 
+            // Manipula os dados do dispositivo
             $this->handleDevices($receivedData);
         }
 
-        socket_close($socket);
+        // Fechar o socket ao encerrar o loop
+        $this->socketService->closeSocket();
     }
 
     private function handleDevices(array $data): void
@@ -94,7 +112,6 @@ class SocketListener extends Command
 
     private function extractDeviceIdFromPacket(string $buffer): ?string
     {
-
         if (preg_match('/ID=([^;]+)/', $buffer, $matches)) {
             return $matches[1];
         }
@@ -102,11 +119,12 @@ class SocketListener extends Command
         return null;
     }
 
-    private function extractMessageIdFromPacket(string $buffer): string
+    private function extractMessageIdFromPacket(string $buffer): ?string
     {
         if (preg_match('/#([A-F0-9]+);/', $buffer, $matches)) {
             return $matches[1];
         }
+
         return null;
     }
 
