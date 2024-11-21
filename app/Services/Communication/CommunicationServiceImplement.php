@@ -2,8 +2,8 @@
 
 namespace App\Services\Communication;
 
+use App\Repositories\Command\CommandRepository;
 use App\Repositories\Device\DeviceRepository;
-use App\Services\Socket\SocketService;
 use LaravelEasyRepository\Service;
 use RuntimeException;
 
@@ -11,41 +11,26 @@ class CommunicationServiceImplement extends Service implements CommunicationServ
 {
     public function __construct(
         protected DeviceRepository $deviceRepository,
-        protected SocketService $socketService)
-        {}
+        protected CommandRepository $commandRepository
+        ) {}
 
-        public function sendMessage(array $data): array
-        {
-            $devices = $this->fetchDevices($data);
-            $statuses = [];
+    public function sendMessage(array $data): void
+    {
 
-            $socket = $this->socketService->getSocket();
+        $devices = $this->fetchDevices($data);
 
-            if (! $socket) {
-                throw new RuntimeException('Socket UDP não está disponível');
-            }
+        foreach ($devices as $device) {
+            $device = (object) $device;
 
-            foreach ($devices as $device) {
-                $device = (object) $device;
-                $sentMessage = $data['message'];
+            $deviceData = [
+                'device_id' => $device->device_id,
+                'content' => $data['message']
+            ];
 
-                $message = "$sentMessage;ID=$device->device_id;#8000;";
-                $checksum = calculateChecksum($message);
-
-                $message = ">$message*$checksum<";
-
-                $sent = socket_sendto($socket, $message, strlen($message), 0, $device->ip, $device->port);
-
-                $statuses[] = [
-                    'device_ip' => $device->ip,
-                    'device_port' => $device->port,
-                    'status' => $sent !== false ? 'success' : 'failed',
-                ];
-            }
-
-            return $statuses;
+            $this->commandRepository->create($deviceData);
         }
 
+    }
 
     private function fetchDevices(array $data): array
     {
@@ -54,6 +39,5 @@ class CommunicationServiceImplement extends Service implements CommunicationServ
         }
 
         return $this->deviceRepository->getAllDevices()->toArray();
-
     }
 }

@@ -6,5 +6,5 @@ use LaravelEasyRepository\BaseService;
 
 interface CommunicationService extends BaseService
 {
-    public function sendMessage(array $data): array;
+    public function sendMessage(array $data): void;
 }

@@ -17,9 +17,9 @@ class CommunicationController extends Controller
     public function sendMessage(SendCommandRequest $request): JsonResponse
     {
         try {
-            $data = $this->communicationService->sendMessage($request->validated());
+            $this->communicationService->sendMessage($request->validated());
 
-            return $this->responseSuccess($data, ApiResponseMessagesEnum::SUCCESS_MESSAGE, 200);
+            return response()->json(['success' => true, 'message' => ApiResponseMessagesEnum::SUCCESS_MESSAGE]);
         } catch (Exception $e) {
 
             return $this->responseError(ApiResponseMessagesEnum::ERROR_MESSAGE, 400);
