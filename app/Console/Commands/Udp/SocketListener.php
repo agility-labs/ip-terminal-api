@@ -7,6 +7,7 @@ use App\Models\Device;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Facades\DB;
 
 class SocketListener extends Command
 {
@@ -31,19 +32,10 @@ class SocketListener extends Command
     {
         $ip = config('app.udp_host');
         $port = config('app.udp_port');
+        $lastCommandFetchTime = microtime(true);
 
-        $socket = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
-
-        if (! $socket) {
-            $this->error('Não foi possível criar o socket UDP');
-
-            return;
-        }
-
-        if (! socket_bind($socket, $ip, $port)) {
-            $this->error('Não foi possível fazer o bind ao socket');
-            socket_close($socket);
-
+        $socket = $this->initializeSocket($ip, $port);
+        if (!$socket) {
             return;
         }
 
@@ -51,48 +43,74 @@ class SocketListener extends Command
         $initialCount = 32770;
         $receivedData = null;
 
-        socket_set_nonblock($socket);
+        try {
+            while (true) {
+                $buffer = '';
+                $from = '';
+                $portFrom = 0;
 
-        while (true) {
-            $buffer = '';
-            $from = '';
-            $portFrom = 0;
+                if (@socket_recvfrom($socket, $buffer, 512, 0, $from, $portFrom) !== false) {
+                    $this->info("Received packet from $from:$portFrom: $buffer");
 
-            if (@socket_recvfrom($socket, $buffer, 512, 0, $from, $portFrom) !== false) {
-                $this->info("Received packet from $from:$portFrom: $buffer");
-                $receivedData = [
-                    'ip' => $from,
-                    'port' => $portFrom,
-                    'buffer' => $buffer,
-                ];
+                    $receivedData = [
+                        'ip' => $from,
+                        'port' => $portFrom,
+                        'buffer' => $buffer,
+                    ];
 
-                $message = $this->mountAckMessage($buffer);
-                socket_sendto($socket, $message, strlen($message), 0, $from, $portFrom);
-                $this->info("Sent packet to $from:$portFrom: $message");
-            }
-
-            $commands = $this->fetchCommands();
-
-            foreach($commands as $command) {
-
-                $device = Device::where('device_id', $command->device_id)->first();
-
-                if ($device) {
-                    $routeMessage = $this->mountCustomMessage($command->device_id, $command->content, $initialCount);
-                    socket_sendto($socket, $routeMessage, strlen($routeMessage), 0, $device->ip, $device->port);
-                    $this->info("Sent packet to $device->ip:$device->port: $routeMessage");
-                    $this->processCommand($command);
+                    $message = $this->mountAckMessage($buffer);
+                    socket_sendto($socket, $message, strlen($message), 0, $from, $portFrom);
+                    $this->info("Sent packet to $from:$portFrom: $message");
                 }
-            }
 
-            if ($receivedData) {
-                $this->handleDevices($receivedData);
-            }
+                if ((microtime(true) - $lastCommandFetchTime) > 5) {
+                    $commands = $this->fetchCommands();
+                    foreach ($commands as $command) {
+                        $device = Device::where('device_id', $command->device_id)->first();
 
-            $initialCount = $initialCount === 65535 ? 32770 : $initialCount;
+                        if ($device) {
+                            $routeMessage = $this->mountCustomMessage($command->device_id, $command->content, $initialCount);
+                            socket_sendto($socket, $routeMessage, strlen($routeMessage), 0, $device->ip, $device->port);
+                            $this->info("Sent packet to $device->ip:$device->port: $routeMessage");
+                            $this->processCommand($command);
+
+                            $initialCount = $initialCount === 65535 ? 32770 : $initialCount;
+                            $initialCount++;
+                        }
+                    }
+                    $lastCommandFetchTime = microtime(true);
+                }
+
+                if ($receivedData) {
+                    $this->handleDevices($receivedData);
+                }
+
+                DB::purge('pgsql');
+
+                usleep(100);
+            }
+        } finally {
+            socket_close($socket);
+        }
+    }
+
+    private function initializeSocket(string $ip, int $port)
+    {
+        $socket = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+
+        if (!$socket) {
+            $this->error('Não foi possível criar o socket UDP');
+            return null;
         }
 
-        socket_close($socket);
+        if (!socket_bind($socket, $ip, $port)) {
+            $this->error('Não foi possível fazer o bind ao socket');
+            socket_close($socket);
+            return null;
+        }
+
+        socket_set_nonblock($socket);
+        return $socket;
     }
 
     private function handleDevices(array $data): void
@@ -110,12 +128,13 @@ class SocketListener extends Command
                     'last_packet' => Carbon::now(),
                 ]
             );
+
+            Device::where('last_packet', '<', Carbon::now()->subDays(30))->delete();
         }
     }
 
     private function extractDeviceIdFromPacket(string $buffer): ?string
     {
-
         if (preg_match('/ID=([^;]+)/', $buffer, $matches)) {
             return $matches[1];
         }
@@ -128,7 +147,7 @@ class SocketListener extends Command
         if (preg_match('/#([A-F0-9]+);/', $buffer, $matches)) {
             return $matches[1];
         }
-        return null;
+        return '';
     }
 
     private function mountAckMessage(string $buffer): string
@@ -144,20 +163,23 @@ class SocketListener extends Command
 
     private function mountCustomMessage(string $deviceId, string $message, int $initialCount): string
     {
-        $initialCount = dechex($initialCount);
-        $newMessage = "$message;ID=$deviceId;#$initialCount;*";
-        $checksum = calculateChecksum('>'.$newMessage.'<');
+        $initialCountHex = dechex($initialCount);
+        $newMessage = "$message;ID=$deviceId;#$initialCountHex;*";
+        $checksum = calculateChecksum(">$newMessage<");
 
-        return ">$newMessage$checksum<\n \r";
+        return ">$newMessage$checksum<\n\r";
     }
 
     private function fetchCommands(): Collection
     {
-        return ModelsCommand::where('processed', false)->get();
+        return ModelsCommand::where('processed', false)
+            ->orderBy('created_at', 'asc') // Otimização para PostgreSQL
+            ->limit(100) // Limitar comandos para evitar sobrecarga
+            ->get();
     }
 
-    private function processCommand(object $command): void{
-        $command->processed = true;
-        $command->save();
+    private function processCommand(object $command): void
+    {
+        $command->update(['processed' => true]);
     }
 }
